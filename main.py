@@ -392,8 +392,8 @@ def notify_done(row):
         time.sleep(1.5 * (attempt + 1))
     print(f"notify_done chat={row['chat_id']} delivered={sent}")
     if DELIVER_VIDEO and row["file_id"]:
-        method = "sendVideo" if row["file_kind"] == "video" else "sendDocument"
-        field = "video" if row["file_kind"] == "video" else "document"
+        field = row["file_kind"] if row["file_kind"] in ("video", "video_note", "animation") else "document"
+        method = {"video": "sendVideo", "video_note": "sendVideoNote", "animation": "sendAnimation"}.get(field, "sendDocument")
         tg(method, chat_id=row["chat_id"], **{field: row["file_id"]}, protect_content=True)
 
 
@@ -412,6 +412,22 @@ def create_link(user_id, chat_id, file_id, kind):
     return code, steps
 
 
+VIDEO_EXT = (".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v", ".3gp", ".flv", ".ts", ".wmv", ".mpg", ".mpeg")
+
+
+def extract_media(m):
+    """(file_id, kind) for any kind of video message, else None."""
+    for key in ("video", "video_note", "animation"):
+        if m.get(key):
+            return m[key]["file_id"], key
+    d = m.get("document")
+    if d:
+        mime, name = str(d.get("mime_type", "")).lower(), str(d.get("file_name", "")).lower()
+        if mime.startswith("video/") or name.endswith(VIDEO_EXT):   # also files sent as application/octet-stream
+            return d["file_id"], "document"
+    return None
+
+
 def handle_update(u):
     m = u.get("message") or {}
     if not m:
@@ -419,16 +435,16 @@ def handle_update(u):
     chat_id, user = m["chat"]["id"], (m.get("from") or {}).get("id", m["chat"]["id"])
     text = (m.get("text") or "").strip()
 
-    media = None
-    if m.get("video"):
-        media = (m["video"]["file_id"], "video")
-    elif m.get("document") and str(m["document"].get("mime_type", "")).startswith("video/"):
-        media = (m["document"]["file_id"], "document")
-
+    media = extract_media(m)
     if not media:
-        tg("sendMessage", chat_id=chat_id, parse_mode="HTML",
-           text="👋 <b>Welcome to Dekho Hatke!</b>\n\nSend me a <b>video</b> and I will create your "
-                "link. Complete all the steps on the website to verify.")
+        if m.get("photo") or m.get("document") or m.get("audio") or m.get("voice") or m.get("sticker"):
+            print("unsupported message:", sorted(set(m) - {"message_id", "from", "chat", "date"}))
+            tg("sendMessage", chat_id=chat_id,
+               text="⚠️ I can only create links for videos. Please send a video (normal video or video file).")
+        else:
+            tg("sendMessage", chat_id=chat_id, parse_mode="HTML",
+               text="👋 <b>Welcome to Dekho Hatke!</b>\n\nSend me a <b>video</b> and I will create your "
+                    "link. Complete all the steps on the website to verify.")
         return
 
     if rate_limited(f"tgu:{user}", 1, USER_COOLDOWN_SEC):
