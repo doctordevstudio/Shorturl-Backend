@@ -154,11 +154,15 @@ def rate_limited(key, limit, per=60):
 
 
 def tg(method, **payload):
+    """Call the Telegram Bot API. Errors are LOGGED (see Render -> Logs), never silent."""
     if not BOT_TOKEN:
         return None
     try:
         r = requests.post(f"{TG}/{method}", json=payload, timeout=15)
-        return r.json()
+        data = r.json()
+        if not data.get("ok"):
+            print(f"telegram NOT OK: {method} chat={payload.get('chat_id')} -> {data}")
+        return data
     except Exception as e:  # noqa
         print("telegram error:", method, e)
         return None
@@ -216,6 +220,12 @@ def headers(resp):
 @app.route("/api/health", methods=["GET", "HEAD"])
 def health():
     return no_store(jsonify(status="ok"))
+
+
+@app.get("/api/ping")
+def ping():
+    """Reachable only with the right PROXY_SECRET (see guard) -> proves proxy setup is correct."""
+    return no_store(jsonify(ok=True, proxy="ok", bot=bool(BOT_TOKEN), site=SITE_URL))
 
 
 # =====================================================================
@@ -369,8 +379,18 @@ def api_verify():
 
 
 def notify_done(row):
-    tg("sendMessage", chat_id=row["chat_id"],
-       text="✅ All steps verified!\n\nThank you for completing every step.", parse_mode="HTML")
+    """Tell the user in Telegram. Retries, because one failed call must not lose the message."""
+    sent = False
+    for attempt in range(4):
+        r = tg("sendMessage", chat_id=row["chat_id"],
+               text="✅ All steps verified!\n\nThank you for completing every step.")
+        if r and r.get("ok"):
+            sent = True
+            break
+        if r and r.get("error_code") in (400, 403):   # chat not found / bot blocked: retrying is pointless
+            break
+        time.sleep(1.5 * (attempt + 1))
+    print(f"notify_done chat={row['chat_id']} delivered={sent}")
     if DELIVER_VIDEO and row["file_id"]:
         method = "sendVideo" if row["file_kind"] == "video" else "sendDocument"
         field = "video" if row["file_kind"] == "video" else "document"
